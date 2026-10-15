@@ -1,0 +1,56 @@
+// Atlas v2 database (job_schedular_v2).
+// Column types mirror the tables exactly as they exist in MySQL, so `prisma migrate diff`
+// against the live database reports no drift.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+}
+
+model User {
+  id         String   @id @default(uuid()) @db.VarChar(36)
+  username   String   @unique @db.VarChar(191)
+  email      String   @unique @db.VarChar(191)
+  password   String   @db.VarChar(191)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  @@map("users")
+}
+
+// Artwork and proofing jobs share one column layout; each board has its own table.
+// machine_name stays NULL until a job is dropped onto a machine column in the UI.
+
+model ArtworkJob {
+  job_id       String   @id @default(uuid()) @db.VarChar(36)
+  job_number   String   @unique
+  job_name     String   @db.Text
+  remarks      String?  @db.Text
+  machine_name String?  @db.Text
+  is_updated   Boolean? @default(false)
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+  run_order    Float?
+  is_completed Boolean? @default(false)
+
+  @@map("artwork_jobs")
+}
+
+model ProofingJob {
+  job_id       String   @id @default(uuid()) @db.VarChar(36)
+  job_number   String   @unique
+  job_name     String   @db.Text
+  remarks      String?  @db.Text
+  machine_name String?  @db.Text
+  is_updated   Boolean? @default(false)
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+  run_order    Float?
+  is_completed Boolean? @default(false)
+
+  @@map("proofing_jobs")
+}

@@ -1,0 +1,12 @@
+# Used on the EC2 server by .github/workflows/deploy.yml.
+# .env.prod is written by the workflow from GitHub secrets. Host port 4002 and the container
+# name keep v2 apart from v1 (atlas-backend on 4001).
+services:
+  atlas-v2-backend:
+    build: .
+    container_name: atlas-v2-backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4002:4000"
+    env_file:
+      - .env.prod

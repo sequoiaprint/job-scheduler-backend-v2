@@ -1,0 +1,154 @@
+name: 🚀 Deploy Atlas v2 backend to AWS EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-atlas-v2-backend
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📦 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📋 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🔧 Generate Prisma client
+        run: npm run prisma:generate
+
+      - name: 🔍 Type-check
+        run: npm run typecheck
+
+      - name: 🧪 Unit tests
+        run: npm test
+
+      - name: 🔨 Build TypeScript
+        run: npm run build
+
+      # Values are single-quoted so characters like ! # $ in passwords reach the app unchanged.
+      # GROVE_DATABASE_HOST/PORT/USER/PASSWORD fall back to the DATABASE_* secrets (same MySQL server).
+      - name: 🔐 Write production environment
+        env:
+          NODE_ENV: production
+          PORT: "4000"
+          CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
+          DATABASE_HOST: ${{ secrets.DATABASE_HOST }}
+          DATABASE_PORT: ${{ secrets.DATABASE_PORT || '3306' }}
+          DATABASE_USER: ${{ secrets.DATABASE_USER }}
+          DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
+          DATABASE_NAME: ${{ secrets.DATABASE_NAME }}
+          DATABASE_CONNECTION_LIMIT: ${{ vars.DATABASE_CONNECTION_LIMIT || '5' }}
+          GROVE_DATABASE_HOST: ${{ secrets.GROVE_DATABASE_HOST || secrets.DATABASE_HOST }}
+          GROVE_DATABASE_PORT: ${{ secrets.GROVE_DATABASE_PORT || secrets.DATABASE_PORT || '3306' }}
+          GROVE_DATABASE_USER: ${{ secrets.GROVE_DATABASE_USER || secrets.DATABASE_USER }}
+          GROVE_DATABASE_PASSWORD: ${{ secrets.GROVE_DATABASE_PASSWORD || secrets.DATABASE_PASSWORD }}
+          GROVE_DATABASE_NAME: ${{ secrets.GROVE_DATABASE_NAME }}
+          GROVE_SYNC_ENABLED: ${{ vars.GROVE_SYNC_ENABLED || 'true' }}
+          GROVE_SYNC_INTERVAL_MS: ${{ vars.GROVE_SYNC_INTERVAL_MS || '60000' }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          JWT_EXPIRES_IN: ${{ vars.JWT_EXPIRES_IN || '7d' }}
+          BCRYPT_SALT_ROUNDS: ${{ vars.BCRYPT_SALT_ROUNDS || '10' }}
+        run: |
+          keys="NODE_ENV PORT CORS_ORIGINS DATABASE_HOST DATABASE_PORT DATABASE_USER DATABASE_PASSWORD DATABASE_NAME DATABASE_CONNECTION_LIMIT GROVE_DATABASE_HOST GROVE_DATABASE_PORT GROVE_DATABASE_USER GROVE_DATABASE_PASSWORD GROVE_DATABASE_NAME GROVE_SYNC_ENABLED GROVE_SYNC_INTERVAL_MS JWT_SECRET JWT_EXPIRES_IN BCRYPT_SALT_ROUNDS"
+          : > .env.prod
+          for key in $keys; do
+            value="${!key}"
+            if [ -z "$value" ]; then
+              echo "::error::Missing GitHub secret: $key"
+              exit 1
+            fi
+            case "$value" in
+              *"'"*) echo "::error::$key contains a single quote, which .env.prod can't hold"; exit 1 ;;
+            esac
+            printf "%s='%s'\n" "$key" "$value" >> .env.prod
+          done
+          echo "✅ .env.prod written with $(wc -l < .env.prod) variables"
+
+      - name: 📂 Push files to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "src/,prisma/,package.json,package-lock.json,tsconfig.json,tsconfig.build.json,prisma.config.ts,Dockerfile,.dockerignore,docker-compose.prod.yml,.env.prod"
+          target: ~/job-scheduler-backend-v2
+          rm: true
+          overwrite: true
+
+      - name: 🔑 Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: 🚀 Deploy app on EC2
+        run: |
+          ssh -i ~/.ssh/id_rsa ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} << 'EOF'
+            set -e
+            cd ~/job-scheduler-backend-v2
+            chmod 600 .env.prod
+
+            echo "======================================"
+            echo "🔨 Building atlas-v2-backend..."
+            echo "======================================"
+            docker compose -p atlas-v2-backend -f docker-compose.prod.yml build --no-cache atlas-v2-backend
+
+            echo "======================================"
+            echo "🚀 Starting atlas-v2-backend..."
+            echo "======================================"
+            docker compose -p atlas-v2-backend -f docker-compose.prod.yml up -d --force-recreate atlas-v2-backend
+
+            echo "======================================"
+            echo "⏳ Waiting for the health check..."
+            echo "======================================"
+            status=starting
+            for i in $(seq 1 24); do
+              status=$(docker inspect --format '{{.State.Health.Status}}' atlas-v2-backend 2>/dev/null || echo missing)
+              if [ "$status" = "healthy" ]; then break; fi
+              sleep 5
+            done
+
+            if [ "$status" = "healthy" ]; then
+              echo "======================================"
+              echo "✅ DEPLOYMENT SUCCESSFUL"
+              echo "======================================"
+              echo "Container: atlas-v2-backend"
+              echo "Port: 127.0.0.1:4002"
+              docker ps --filter "name=atlas-v2-backend"
+              docker image prune -f --filter "dangling=true" > /dev/null
+            else
+              echo "======================================"
+              echo "❌ DEPLOYMENT FAILED (health: $status)"
+              echo "======================================"
+              docker ps -a --filter "name=atlas-v2-backend"
+              echo ""
+              echo "📋 Container logs:"
+              docker logs atlas-v2-backend --tail 100 2>/dev/null || true
+              exit 1
+            fi
+          EOF
+
+      - name: 📊 Deployment summary
+        run: |
+          echo "======================================"
+          echo "🚀 Atlas v2 backend deployed"
+          echo "======================================"
+          echo "Container: atlas-v2-backend"
+          echo "Port: 127.0.0.1:4002"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "======================================"

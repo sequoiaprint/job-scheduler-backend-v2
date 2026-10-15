@@ -1,0 +1,11 @@
+{
+  // Compiles only the application into dist/ (dist/server.js is the entry point).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "noEmit": false,
+    "sourceMap": true
+  },
+  "include": ["src"]
+}

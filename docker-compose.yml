@@ -1,0 +1,11 @@
+# Runs the API in a container with the same .env used locally.
+# Host port 4002 keeps it clear of the v1 container (atlas-backend on 4001).
+services:
+  atlas-v2-backend:
+    build: .
+    container_name: atlas-v2-backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4002:4000"
+    env_file:
+      - .env
