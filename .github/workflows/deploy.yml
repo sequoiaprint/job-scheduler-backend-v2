@@ -1,24 +1,68 @@
-name: 🚀 Deploy Atlas v2 backend to AWS EC2
+name: 🚀 Atlas v2 backend — test & deploy
 
 on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 concurrency:
-  group: deploy-atlas-v2-backend
+  group: atlas-v2-backend-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  # ════════════════════════════════════════════════════════════════
+  # 1. TEST: type-check, unit tests, migrations on a throwaway MySQL,
+  #    build the Docker image and smoke-test it. Runs for pushes and PRs.
+  # ════════════════════════════════════════════════════════════════
+  build-and-test:
     runs-on: ubuntu-latest
 
+    # ── Throwaway MySQL, alive only for this run ──
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root-password
+          MYSQL_DATABASE: atlas_ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-root-password"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+
+    # ── Throwaway values for the CI database only (not secrets). Grove points at the same
+    #    MySQL: the health check only pings it, and the sync stays off.
+    #    No NODE_ENV=production here: it would make `npm ci` skip devDependencies. ──
+    env:
+      CORS_ORIGINS: http://localhost:3000
+      DATABASE_HOST: 127.0.0.1
+      DATABASE_PORT: "3306"
+      DATABASE_USER: root
+      DATABASE_PASSWORD: ci-root-password
+      DATABASE_NAME: atlas_ci
+      GROVE_DATABASE_HOST: 127.0.0.1
+      GROVE_DATABASE_PORT: "3306"
+      GROVE_DATABASE_USER: root
+      GROVE_DATABASE_PASSWORD: ci-root-password
+      GROVE_DATABASE_NAME: atlas_ci
+      GROVE_SYNC_ENABLED: "false"
+      JWT_SECRET: ci-only-jwt-secret-not-used-anywhere-else
+      ADMIN_USERNAME: ci-admin
+      ADMIN_EMAIL: ci-admin@atlas.local
+      ADMIN_PASSWORD: ci-admin-password
+
     steps:
-      - name: 📦 Checkout code
+      # ── Setup ──
+      - name: ⬇️ Checkout code
         uses: actions/checkout@v4
 
-      - name: 📋 Setup Node.js
+      - name: ⚙️ Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -27,19 +71,100 @@ jobs:
       - name: 📦 Install dependencies
         run: npm ci
 
-      - name: 🔧 Generate Prisma client
+      - name: 🔧 Prisma generate
         run: npm run prisma:generate
 
+      # ── Test cases ──
       - name: 🔍 Type-check
         run: npm run typecheck
 
       - name: 🧪 Unit tests
         run: npm test
 
-      - name: 🔨 Build TypeScript
+      - name: 🏗️ Build
         run: npm run build
 
-      # Values are single-quoted so characters like ! # $ in passwords reach the app unchanged.
+      # ── Database ──
+      - name: 🗄️ Run migrations (throwaway MySQL)
+        run: npx prisma migrate deploy
+
+      # Fails when schema.prisma was changed without creating a migration for it.
+      - name: 🔎 Schema matches migrations
+        run: npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code
+
+      - name: 🌱 Seed a CI admin user
+        run: npm run seed:admin
+
+      # ── Docker image: build it once here, test it, and hand the same image to deploy ──
+      - name: 🐳 Build prod image (Dockerfile)
+        run: docker build -t atlas-v2-backend:latest .
+
+      - name: 💨 Smoke-test the image
+        run: |
+          # -e NAME (no value) passes the job's own env value into the container.
+          docker run -d --name atlas-v2-ci --network host \
+            -e CORS_ORIGINS \
+            -e DATABASE_HOST -e DATABASE_PORT -e DATABASE_USER -e DATABASE_PASSWORD -e DATABASE_NAME \
+            -e GROVE_DATABASE_HOST -e GROVE_DATABASE_PORT -e GROVE_DATABASE_USER -e GROVE_DATABASE_PASSWORD -e GROVE_DATABASE_NAME \
+            -e GROVE_SYNC_ENABLED -e JWT_SECRET \
+            atlas-v2-backend:latest
+
+          api=http://127.0.0.1:4000
+          for i in $(seq 1 30); do
+            if curl -fsS "$api/health" > health.json 2>/dev/null; then break; fi
+            sleep 2
+          done
+          echo "health: $(cat health.json)"
+          jq -e '.data.status == "ok" and .data.database == "up"' health.json > /dev/null
+
+          token=$(curl -fsS -X POST "$api/api/auth/login" -H "Content-Type: application/json" \
+            -d "{\"username\":\"$ADMIN_USERNAME\",\"password\":\"$ADMIN_PASSWORD\"}" | jq -r '.data.token')
+          if [ -z "$token" ] || [ "$token" = "null" ]; then echo "::error::login failed"; exit 1; fi
+
+          for board in artwork proofing; do
+            curl -fsS "$api/api/jobs/$board/board" -H "Authorization: Bearer $token" \
+              | jq -e '.data.machines | length > 0' > /dev/null
+            echo "✅ $board board served"
+          done
+
+          status=$(curl -s -o /dev/null -w '%{http_code}' "$api/api/jobs/artwork/board")
+          if [ "$status" != "401" ]; then echo "::error::expected 401 without a token, got $status"; exit 1; fi
+          echo "✅ image boots, connects to MySQL, logs in and serves both boards"
+
+      - name: 📋 Container logs (on failure)
+        if: failure()
+        run: docker logs atlas-v2-ci 2>&1 || true
+
+      - name: 📦 Save image as tarball
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: docker save atlas-v2-backend:latest | gzip > atlas-v2-backend.tar.gz
+
+      - name: ⬆️ Hand the tested image to the deploy job
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-v2-backend-image
+          path: atlas-v2-backend.tar.gz
+          retention-days: 1
+
+  # ════════════════════════════════════════════════════════════════
+  # 2. DEPLOY: only after the tests pass, only for main.
+  #    Ships the tested image to EC2 and restarts the container.
+  # ════════════════════════════════════════════════════════════════
+  deploy-prod:
+    needs: build-and-test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ⬇️ Download the tested image
+        uses: actions/download-artifact@v4
+        with:
+          name: atlas-v2-backend-image
+
+      # Read by `docker run --env-file`, which takes everything after "=" literally, so
+      # values are written unquoted (passwords with ! # $ stay intact).
+      # Sync interval, token lifetime, etc. use the app defaults (see .env.example).
       # GROVE_DATABASE_HOST/PORT/USER/PASSWORD fall back to the DATABASE_* secrets (same MySQL server).
       - name: 🔐 Write production environment
         env:
@@ -51,19 +176,14 @@ jobs:
           DATABASE_USER: ${{ secrets.DATABASE_USER }}
           DATABASE_PASSWORD: ${{ secrets.DATABASE_PASSWORD }}
           DATABASE_NAME: ${{ secrets.DATABASE_NAME }}
-          DATABASE_CONNECTION_LIMIT: ${{ vars.DATABASE_CONNECTION_LIMIT || '5' }}
           GROVE_DATABASE_HOST: ${{ secrets.GROVE_DATABASE_HOST || secrets.DATABASE_HOST }}
           GROVE_DATABASE_PORT: ${{ secrets.GROVE_DATABASE_PORT || secrets.DATABASE_PORT || '3306' }}
           GROVE_DATABASE_USER: ${{ secrets.GROVE_DATABASE_USER || secrets.DATABASE_USER }}
           GROVE_DATABASE_PASSWORD: ${{ secrets.GROVE_DATABASE_PASSWORD || secrets.DATABASE_PASSWORD }}
           GROVE_DATABASE_NAME: ${{ secrets.GROVE_DATABASE_NAME }}
-          GROVE_SYNC_ENABLED: ${{ vars.GROVE_SYNC_ENABLED || 'true' }}
-          GROVE_SYNC_INTERVAL_MS: ${{ vars.GROVE_SYNC_INTERVAL_MS || '60000' }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          JWT_EXPIRES_IN: ${{ vars.JWT_EXPIRES_IN || '7d' }}
-          BCRYPT_SALT_ROUNDS: ${{ vars.BCRYPT_SALT_ROUNDS || '10' }}
         run: |
-          keys="NODE_ENV PORT CORS_ORIGINS DATABASE_HOST DATABASE_PORT DATABASE_USER DATABASE_PASSWORD DATABASE_NAME DATABASE_CONNECTION_LIMIT GROVE_DATABASE_HOST GROVE_DATABASE_PORT GROVE_DATABASE_USER GROVE_DATABASE_PASSWORD GROVE_DATABASE_NAME GROVE_SYNC_ENABLED GROVE_SYNC_INTERVAL_MS JWT_SECRET JWT_EXPIRES_IN BCRYPT_SALT_ROUNDS"
+          keys="NODE_ENV PORT CORS_ORIGINS DATABASE_HOST DATABASE_PORT DATABASE_USER DATABASE_PASSWORD DATABASE_NAME GROVE_DATABASE_HOST GROVE_DATABASE_PORT GROVE_DATABASE_USER GROVE_DATABASE_PASSWORD GROVE_DATABASE_NAME JWT_SECRET"
           : > .env.prod
           for key in $keys; do
             value="${!key}"
@@ -71,51 +191,55 @@ jobs:
               echo "::error::Missing GitHub secret: $key"
               exit 1
             fi
-            case "$value" in
-              *"'"*) echo "::error::$key contains a single quote, which .env.prod can't hold"; exit 1 ;;
-            esac
-            printf "%s='%s'\n" "$key" "$value" >> .env.prod
+            if [ "$(printf '%s' "$value" | wc -l)" -ne 0 ]; then
+              echo "::error::$key spans several lines, which an env file can't hold"
+              exit 1
+            fi
+            printf '%s=%s\n' "$key" "$value" >> .env.prod
           done
           echo "✅ .env.prod written with $(wc -l < .env.prod) variables"
 
-      - name: 📂 Push files to EC2
+      - name: 🚚 Push image to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          source: "src/,prisma/,package.json,package-lock.json,tsconfig.json,tsconfig.build.json,prisma.config.ts,Dockerfile,.dockerignore,docker-compose.prod.yml,.env.prod"
-          target: ~/job-scheduler-backend-v2
-          rm: true
+          source: "atlas-v2-backend.tar.gz,.env.prod"
+          target: ~/atlas-v2-backend
           overwrite: true
+          timeout: 180s
+          command_timeout: 15m
 
-      - name: 🔑 Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
-
-      - name: 🚀 Deploy app on EC2
-        run: |
-          ssh -i ~/.ssh/id_rsa ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} << 'EOF'
+      - name: 🚀 Load image & restart container on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 120s
+          command_timeout: 15m
+          script: |
             set -e
-            cd ~/job-scheduler-backend-v2
+            cd ~/atlas-v2-backend
             chmod 600 .env.prod
 
-            echo "======================================"
-            echo "🔨 Building atlas-v2-backend..."
-            echo "======================================"
-            docker compose -p atlas-v2-backend -f docker-compose.prod.yml build --no-cache atlas-v2-backend
+            echo "🐳 Loading image..."
+            docker load < atlas-v2-backend.tar.gz
 
-            echo "======================================"
-            echo "🚀 Starting atlas-v2-backend..."
-            echo "======================================"
-            docker compose -p atlas-v2-backend -f docker-compose.prod.yml up -d --force-recreate atlas-v2-backend
+            echo "🛑 Replacing atlas-v2-backend..."
+            docker stop atlas-v2-backend 2>/dev/null || true
+            docker rm atlas-v2-backend 2>/dev/null || true
 
-            echo "======================================"
+            # Host port 4002 keeps v2 apart from v1 (atlas-backend on 4001).
+            docker run -d \
+              --name atlas-v2-backend \
+              --restart unless-stopped \
+              --env-file .env.prod \
+              -p 127.0.0.1:4002:4000 \
+              atlas-v2-backend:latest
+
             echo "⏳ Waiting for the health check..."
-            echo "======================================"
             status=starting
             for i in $(seq 1 24); do
               status=$(docker inspect --format '{{.State.Health.Status}}' atlas-v2-backend 2>/dev/null || echo missing)
@@ -123,32 +247,13 @@ jobs:
               sleep 5
             done
 
-            if [ "$status" = "healthy" ]; then
-              echo "======================================"
-              echo "✅ DEPLOYMENT SUCCESSFUL"
-              echo "======================================"
-              echo "Container: atlas-v2-backend"
-              echo "Port: 127.0.0.1:4002"
-              docker ps --filter "name=atlas-v2-backend"
-              docker image prune -f --filter "dangling=true" > /dev/null
-            else
-              echo "======================================"
+            if [ "$status" != "healthy" ]; then
               echo "❌ DEPLOYMENT FAILED (health: $status)"
-              echo "======================================"
-              docker ps -a --filter "name=atlas-v2-backend"
-              echo ""
-              echo "📋 Container logs:"
-              docker logs atlas-v2-backend --tail 100 2>/dev/null || true
+              docker logs atlas-v2-backend --tail 100 2>&1 || true
               exit 1
             fi
-          EOF
 
-      - name: 📊 Deployment summary
-        run: |
-          echo "======================================"
-          echo "🚀 Atlas v2 backend deployed"
-          echo "======================================"
-          echo "Container: atlas-v2-backend"
-          echo "Port: 127.0.0.1:4002"
-          echo "Branch: ${{ github.ref_name }}"
-          echo "======================================"
+            echo "✅ DEPLOYMENT SUCCESSFUL: atlas-v2-backend on 127.0.0.1:4002"
+            docker ps --filter "name=atlas-v2-backend"
+            rm -f atlas-v2-backend.tar.gz
+            docker image prune -f

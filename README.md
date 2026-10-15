@@ -147,27 +147,13 @@ docker compose up --build   # builds the image, serves on 127.0.0.1:4002 using .
 
 The image contains only `dist/` and production dependencies and runs as the `node` user. `.env` is supplied at runtime. Its health check calls `/health`, so the container is healthy only while both databases are reachable.
 
-## CI checks (GitHub Actions)
+## CI/CD pipeline (GitHub Actions → EC2)
 
-`.github/workflows/checks.yml` runs on every push and on pull requests into `main`. It needs no secrets, because it starts its own throwaway MySQL:
+One workflow, `.github/workflows/deploy.yml`, with two jobs (the same shape as Grove backend):
 
-1. Install, Prisma client, type-check, unit tests, build.
-2. Apply the migrations to the empty MySQL, then fail if `schema.prisma` has changes without a migration.
-3. Seed a CI admin, build the Docker image, and run it.
-4. Check that `/health` is ok, the admin can log in, both boards are served, and a request without a token gets 401.
+| Job | Runs on | What it does |
+|---|---|---|
+| **build-and-test** | every push to `main`, PRs into `main`, manual run | Install → Prisma client → type-check → unit tests → build. Applies the migrations to a throwaway MySQL and fails if `schema.prisma` changed without a migration. Seeds a CI admin, builds the Docker image and smoke-tests it (`/health` ok, login, both boards, 401 without a token). |
+| **deploy-prod** | `needs: build-and-test`, `main` only | Takes the **image that was just tested**, writes `.env.prod` from the repository secrets, copies both to `~/atlas-v2-backend` on EC2, replaces the `atlas-v2-backend` container (`127.0.0.1:4002`, separate from v1's `atlas-backend` on 4001) and waits for its health check. |
 
-To make it a merge gate, mark **Backend checks** as a required status check in the `main` branch protection rule.
-
-## Deploy (GitHub Actions → EC2)
-
-`.github/workflows/deploy.yml` runs on every push to `main` (or manually from the Actions tab). It follows the same flow as v1:
-
-1. Install, type-check, run the unit tests and build.
-2. Write `.env.prod` from the repository secrets.
-3. Copy the sources to `~/job-scheduler-backend-v2` on the EC2 server.
-4. `docker compose -p atlas-v2-backend -f docker-compose.prod.yml` build and up.
-5. Wait for the container health check.
-
-It runs as container `atlas-v2-backend` on `127.0.0.1:4002`, separate from v1's `atlas-backend` (4001).
-
-A missing secret fails the run before anything is copied. Point your reverse proxy (domain → `127.0.0.1:4002`) at the API. Socket.IO needs WebSocket upgrade headers on that proxy.
+If any test fails, nothing is deployed. A missing secret also stops the deploy before anything reaches the server. Point your reverse proxy (domain → `127.0.0.1:4002`) at the API, with WebSocket upgrade headers for Socket.IO.
