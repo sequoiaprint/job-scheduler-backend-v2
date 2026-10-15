@@ -147,6 +147,17 @@ docker compose up --build   # builds the image, serves on 127.0.0.1:4002 using .
 
 The image contains only `dist/` and production dependencies and runs as the `node` user. `.env` is supplied at runtime. Its health check calls `/health`, so the container is healthy only while both databases are reachable.
 
+## CI checks (GitHub Actions)
+
+`.github/workflows/checks.yml` runs on every push and on pull requests into `main`. It needs no secrets, because it starts its own throwaway MySQL:
+
+1. Install, Prisma client, type-check, unit tests, build.
+2. Apply the migrations to the empty MySQL, then fail if `schema.prisma` has changes without a migration.
+3. Seed a CI admin, build the Docker image, and run it.
+4. Check that `/health` is ok, the admin can log in, both boards are served, and a request without a token gets 401.
+
+To make it a merge gate, mark **Backend checks** as a required status check in the `main` branch protection rule.
+
 ## Deploy (GitHub Actions → EC2)
 
 `.github/workflows/deploy.yml` runs on every push to `main` (or manually from the Actions tab). It follows the same flow as v1:
