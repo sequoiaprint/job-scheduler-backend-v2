@@ -166,6 +166,7 @@ jobs:
       # values are written unquoted (passwords with ! # $ stay intact).
       # Sync interval, token lifetime, etc. use the app defaults (see .env.example).
       # GROVE_DATABASE_HOST/PORT/USER/PASSWORD fall back to the DATABASE_* secrets (same MySQL server).
+      # CORS_ORIGINS and JWT_SECRET are optional: blank means any origin / a random secret per start.
       - name: 🔐 Write production environment
         env:
           NODE_ENV: production
@@ -183,11 +184,15 @@ jobs:
           GROVE_DATABASE_NAME: ${{ secrets.GROVE_DATABASE_NAME }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
         run: |
-          keys="NODE_ENV PORT CORS_ORIGINS DATABASE_HOST DATABASE_PORT DATABASE_USER DATABASE_PASSWORD DATABASE_NAME GROVE_DATABASE_HOST GROVE_DATABASE_PORT GROVE_DATABASE_USER GROVE_DATABASE_PASSWORD GROVE_DATABASE_NAME JWT_SECRET"
+          required="NODE_ENV PORT DATABASE_HOST DATABASE_PORT DATABASE_USER DATABASE_PASSWORD DATABASE_NAME GROVE_DATABASE_HOST GROVE_DATABASE_PORT GROVE_DATABASE_USER GROVE_DATABASE_PASSWORD GROVE_DATABASE_NAME"
+          optional="CORS_ORIGINS JWT_SECRET"
           : > .env.prod
-          for key in $keys; do
+          for key in $required $optional; do
             value="${!key}"
             if [ -z "$value" ]; then
+              case " $optional " in
+                *" $key "*) echo "ℹ️ $key not set, using the app default"; continue ;;
+              esac
               echo "::error::Missing GitHub secret: $key"
               exit 1
             fi

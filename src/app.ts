@@ -1,7 +1,7 @@
 import cors from "cors";
 import express from "express";
 import morgan from "morgan";
-import { env } from "./config/env.config.js";
+import { corsOrigin, env } from "./config/env.config.js";
 import healthRoutes from "./features/health/routes/health.routes.js";
 import { errorHandler } from "./middlewares/error.middleware.js";
 import { notFoundHandler } from "./middlewares/not-found.middleware.js";
@@ -12,7 +12,7 @@ export const createApp = () => {
   const app = express();
 
   app.disable("x-powered-by");
-  app.use(cors({ origin: env.CORS_ORIGINS }));
+  app.use(cors({ origin: corsOrigin }));
   app.use(express.json({ limit: "100kb" }));
   app.use(morgan(env.NODE_ENV === "production" ? "combined" : "dev"));
 

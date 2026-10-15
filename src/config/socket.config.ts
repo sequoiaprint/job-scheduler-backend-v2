@@ -1,6 +1,6 @@
 import type { Server as HttpServer } from "node:http";
 import { Server } from "socket.io";
-import { env } from "./env.config.js";
+import { corsOrigin } from "./env.config.js";
 import { verifyToken } from "../utils/jwt.utils.js";
 import { logger } from "../utils/logger.utils.js";
 
@@ -8,7 +8,7 @@ import { logger } from "../utils/logger.utils.js";
 let io: Server | null = null;
 
 export const initSocketServer = (httpServer: HttpServer): Server => {
-  io = new Server(httpServer, { cors: { origin: env.CORS_ORIGINS } });
+  io = new Server(httpServer, { cors: { origin: corsOrigin } });
 
   io.use((socket, next) => {
     const token: unknown = socket.handshake.auth?.token;

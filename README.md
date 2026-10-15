@@ -82,13 +82,13 @@ npm test                    # unit tests
 |---|---|
 | `NODE_ENV` | `development` / `production` |
 | `PORT` | API port (default 4000) |
-| `CORS_ORIGINS` | Comma-separated frontend origins allowed by CORS and Socket.IO |
+| `CORS_ORIGINS` | Comma-separated frontend origins allowed by CORS and Socket.IO. Blank or `*` = any origin |
 | `DATABASE_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_NAME` | Atlas database (`job_schedular_v2`). The Prisma CLI builds its URL from these too. |
 | `DATABASE_CONNECTION_LIMIT` | Prisma pool size |
 | `GROVE_DATABASE_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_NAME` | Grove database: `grove_db_dev_backup` while Grove is in development, `grove_db` once it is live |
 | `GROVE_SYNC_ENABLED` | `false` turns off both the automatic and the manual sync |
 | `GROVE_SYNC_INTERVAL_MS` | Sync interval (default 60000, minimum 10000) |
-| `JWT_SECRET` / `JWT_EXPIRES_IN` | Token signing (secret ≥ 32 chars) / lifetime (default `7d`) |
+| `JWT_SECRET` / `JWT_EXPIRES_IN` | Token signing secret (blank = random per start, so users sign in again after restarts) / lifetime (default `7d`) |
 | `BCRYPT_SALT_ROUNDS` | Password hashing cost (default 10) |
 | `ADMIN_USERNAME` / `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Used only by `npm run seed:admin` |
 

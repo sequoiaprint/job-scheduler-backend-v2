@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import dotenv from "dotenv";
 import { z } from "zod";
 
@@ -8,12 +9,14 @@ dotenv.config({ quiet: true });
 
 const commaSeparated = z
   .string()
+  .default("")
   .transform((value) => value.split(",").map((item) => item.trim()).filter(Boolean));
 
 const EnvSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   PORT: z.coerce.number().int().positive().default(4000),
-  CORS_ORIGINS: commaSeparated.pipe(z.array(z.url()).min(1)),
+  // Blank (or "*") allows every origin.
+  CORS_ORIGINS: commaSeparated,
 
   DATABASE_HOST: z.string().min(1),
   DATABASE_PORT: z.coerce.number().int().positive().default(3306),
@@ -30,7 +33,8 @@ const EnvSchema = z.object({
   GROVE_SYNC_ENABLED: z.stringbool().default(true),
   GROVE_SYNC_INTERVAL_MS: z.coerce.number().int().min(10_000).default(60_000),
 
-  JWT_SECRET: z.string().min(32),
+  // Blank: a random secret is generated at startup (sessions then end on every restart).
+  JWT_SECRET: z.string().default(""),
   JWT_EXPIRES_IN: z.string().min(1).default("7d"),
   BCRYPT_SALT_ROUNDS: z.coerce.number().int().min(8).max(14).default(10),
 });
@@ -45,4 +49,15 @@ if (!parsed.success) {
   process.exit(1);
 }
 
-export const env = parsed.data;
+if (!parsed.data.JWT_SECRET) {
+  console.warn("JWT_SECRET is blank: using a random secret, so users must sign in again after every restart.");
+}
+
+export const env = {
+  ...parsed.data,
+  JWT_SECRET: parsed.data.JWT_SECRET || randomBytes(48).toString("hex"),
+};
+
+// Origins allowed by CORS and Socket.IO: `true` allows any origin (CORS_ORIGINS blank or "*").
+export const corsOrigin: true | string[] =
+  env.CORS_ORIGINS.length === 0 || env.CORS_ORIGINS.includes("*") ? true : env.CORS_ORIGINS;
