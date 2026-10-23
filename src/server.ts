@@ -5,6 +5,7 @@ import { grovePool } from "./config/grove-db.config.js";
 import { prisma } from "./config/prisma.config.js";
 import { closeSocketServer, initSocketServer } from "./config/socket.config.js";
 import { startGroveSyncScheduler, stopGroveSyncScheduler } from "./features/grove-sync/services/grove-sync.scheduler.js";
+import { logDatabaseConnectivity } from "./features/health/services/health.service.js";
 import { logger } from "./utils/logger.utils.js";
 
 const httpServer = createServer(createApp());
@@ -12,6 +13,7 @@ initSocketServer(httpServer);
 
 httpServer.listen(env.PORT, () => {
   logger.info(`Atlas API listening on port ${env.PORT} (${env.NODE_ENV})`);
+  void logDatabaseConnectivity();
   startGroveSyncScheduler();
 });
 

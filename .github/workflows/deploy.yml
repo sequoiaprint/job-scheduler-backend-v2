@@ -189,6 +189,12 @@ jobs:
           : > .env.prod
           for key in $required $optional; do
             value="${!key}"
+            # Secrets copied from a .env file often keep their quotes ("value"). Compose used to strip
+            # them; `docker run --env-file` doesn't, so strip one surrounding pair here.
+            case "$value" in
+              \"*\") value="${value#\"}"; value="${value%\"}" ;;
+              \'*\') value="${value#\'}"; value="${value%\'}" ;;
+            esac
             if [ -z "$value" ]; then
               case " $optional " in
                 *" $key "*) echo "ℹ️ $key not set, using the app default"; continue ;;
